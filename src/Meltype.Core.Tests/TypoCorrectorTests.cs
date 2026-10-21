@@ -130,6 +130,43 @@ internal static class TypoCorrectorTests
     }
 
     [Test]
+    public static void JapanesePhraseTypo_IsCorrected()
+    {
+        // 今日は雨 (kyouhaame) の h と a が入れ替わった
+        var r = Shared.Value.Correct("kyouahame", Language.Japanese);
+        Assert.Equal("kyouhaame", r.Output);
+        Assert.Equal(false, Shared.Value.Correct("kyouhaame", Language.Japanese).Corrected, "正しい文はそのまま");
+    }
+
+    [Test]
+    public static void JapanesePhraseTypos_AreMostlyFixedWithoutMiscorrection()
+    {
+        var c = Shared.Value;
+        var s = Run(c, MakePhraseSamples(500, 901));
+        // 打ち間違いの文を、別の (やはり違う) 文に直してしまう率。正しい文を壊すのとは別 (それは JapanesePhrases_AreNotChanged)
+        Assert.True(s.WrongRate <= 0.06, $"日本語の文の打ち間違い: {s}");
+        Assert.True(s.FixRate >= 0.30, $"日本語の文の打ち間違い: {s}");
+    }
+
+    /// <summary>語 + 助詞 + 語 の文に、雑音を 1 つ入れたもの。</summary>
+    public static List<Sample> MakePhraseSamples(int count, int seed, Noise? noise = null)
+    {
+        var random = new Random(seed);
+        var words = JapaneseWords(4);
+        string[] particles = ["ha", "ga", "wo", "ni", "de", "to", "mo", "no", "kara", "made"];
+        var list = new List<Sample>();
+        while (list.Count < count)
+        {
+            var phrase = words[random.Next(words.Length)] + particles[random.Next(particles.Length)] + words[random.Next(words.Length)];
+            var kind = noise ?? (Noise)random.Next(4);
+            var typo = AddNoise(phrase, kind, random);
+            if (typo == phrase) continue;
+            list.Add(new Sample(phrase.Replace("N", "nn"), typo.Replace("N", "nn"), Language.Japanese, kind));
+        }
+        return list;
+    }
+
+    [Test]
     public static void JapanesePhrases_AreNotChanged()
     {
         // 語 + 助詞 + 語 は辞書に無いが、正しい日本語。直したら直し間違い。
@@ -276,6 +313,9 @@ internal static class TypoCorrectorTests
         public override string ToString() => $"n={N,4} 直った {FixRate,6:P1}  別の語に直した {WrongRate,6:P2} ({Wrong})  そのまま {(double)Kept / Math.Max(N, 1),6:P1}";
     }
 
+    /// <summary>null でなければ、Run が別の語に直した例をここに入れる (調べる用)。</summary>
+    public static List<string>? WrongExamples;
+
     public static Score Run(TypoCorrector c, IEnumerable<Sample> samples, Func<Sample, Language?>? previous = null)
     {
         int n = 0, ok = 0, wrong = 0, kept = 0;
@@ -284,8 +324,12 @@ internal static class TypoCorrectorTests
             n++;
             var r = c.Correct(s.Typed, previous is null ? s.Language : previous(s));
             if (!r.Corrected) kept++;
-            else if (r.Output == s.Original) ok++;
-            else wrong++;
+            else if (r.Output == s.Original || s.Language == Language.Japanese && TypoCorrector.Normalize(r.Output) == TypoCorrector.Normalize(s.Original)) ok++;
+            else
+            {
+                wrong++;
+                if (WrongExamples is { Count: < 12 } list) list.Add($"{s.Typed}→{r.Output} (正解 {s.Original})");
+            }
         }
         return new Score(n, ok, wrong, kept);
     }
@@ -343,6 +387,12 @@ internal static class TypoCorrectorTests
         Console.WriteLine("\n[日本語: 雑音の種類ごと (2000 語ずつ)]");
         foreach (var kind in Enum.GetValues<Noise>())
             Console.WriteLine($"  {kind,-12} {Run(c, MakeSamples(c, 2000, 211, Language.Japanese, kind))}");
+
+        Console.WriteLine("\n[日本語の文の打ち間違い (語 + 助詞 + 語 に雑音 1 つ。2000 文ずつ)]");
+        foreach (var kind in Enum.GetValues<Noise>())
+            Console.WriteLine($"  {kind,-12} {Run(c, MakePhraseSamples(2000, 911, kind))}");
+        foreach (var t in new[] { "kyouahame", "kyouhaaem", "watashihagakusei", "watshihagakusei", "ashitahaharedesu", "ashitahaharedsu" })
+            Console.WriteLine($"  例 {t} → {c.Correct(t, Language.Japanese).Output}");
 
         Console.WriteLine("\n[日本語の文 (語 + 助詞 + 語。直してはいけない)]");
         var phrases = PhraseFalseCorrections(c, 2000, 811);
@@ -414,6 +464,22 @@ internal static class TypoCorrectorTests
             Console.WriteLine($"ローマ字に足す差={extra} 日本語 {ja} / 辞書に無い語を直した {oov}/{OutOfVocabulary.Length} / 文 {PhraseFalseCorrections(c, 500, 7).Changed}/500");
         }
         c.ValidRomajiExtra = 1.5;
+        // 日本語の文の直しの差 (seed 7): 打ち間違いの文と、正しい文・辞書に無い語を直してしまった数
+        foreach (var pa in new[] { 6.0, 8.0, 10.0, 12.0 })
+        foreach (var pt in new[] { 1.0, 2.0, 3.0 })
+            foreach (var w in new[] { 1.0, 2.0 })
+            {
+                c.PhraseAlpha = pa;
+                c.PhraseTheta = pt;
+                c.PhraseSegmentWeight = w;
+                WrongExamples = [];
+                var ph = Run(c, MakePhraseSamples(600, 7));
+                Console.WriteLine($"文の α={pa} 文の差={pt} 区切りの重み={w} {ph} / kyouahame→{c.Correct("kyouahame", Language.Japanese).Output} / 正しい文 {PhraseFalseCorrections(c, 600, 7).Changed}/600 / 辞書に無い語 {OutOfVocabulary.Count(x => c.Correct(x).Corrected)}");
+                WrongExamples = null;
+            }
+        c.PhraseAlpha = 6.0;
+        c.PhraseTheta = 1.0;
+        c.PhraseSegmentWeight = 2.0;
         foreach (var extra in new[] { 0.0, 0.5, 1.0, 2.0 })
         {
             c.CostlyEditExtra = extra;

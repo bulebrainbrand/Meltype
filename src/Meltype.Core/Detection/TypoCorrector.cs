@@ -155,6 +155,18 @@ public sealed class TypoCorrector
         if (_english.Contains(lower) || _protected.Contains(lower)) return Keep(input, Language.English);
         if (_japanese.Contains(romaji)) return Keep(input, Language.Japanese);
         if (lower.Length < MinLength || !lower.All(char.IsAsciiLetterLower)) return Keep(input, previous ?? Language.English);
+        // 日本語の文 (kyouhaame) は語に区切れればそのまま、区切れなければ 1 文字の打ち間違いを直して区切れるかを見る (kyouahame → kyouhaame)
+        // (語の直しで直らなかったときだけ。下の TryPhrase)
+        var phraseAllowed = previous != Language.English && lower.Length >= PhraseMinLength;
+        if (phraseAllowed && SegmentCost(romaji) <= PhraseMaxCost(romaji)) return Keep(input, Language.Japanese);
+        var word = CorrectWord(input, lower, romaji, previous);
+        // 語の直しに候補があって (差が足りずに) そのままにしたものは、文として区切り直さない (1 語の打ち間違いを 2 語に割ってしまう)
+        if (word.Corrected || !phraseAllowed || word.Candidates.Count > 0) return word;
+        return CorrectPhrase(input) is { Corrected: true } phrase ? phrase : word;
+    }
+
+    private Result CorrectWord(string input, string lower, string romaji, Language? previous)
+    {
 
         var candidates = new List<Candidate>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -189,6 +201,100 @@ public sealed class TypoCorrector
         return margin >= theta
             ? new Result(input, top.Word, top.Language, true, margin, candidates)
             : new Result(input, input, top.Language, false, margin, candidates);
+    }
+
+    public const int PhraseMinLength = 6;
+    public const int PhraseMaxLength = 40;
+
+    /// <summary>助詞 (語の間に来る 1〜2 音の語。区切るときに安くする)。</summary>
+    private static readonly HashSet<string> Particles = new(StringComparer.Ordinal)
+        { "ha", "ga", "wo", "ni", "de", "to", "mo", "no", "he", "ya", "ka", "ne", "yo", "kara", "made", "yori", "dake", "desu", "da", "masu", "ta", "te" };
+
+    /// <summary>文の途中によく来る助詞 (は・が・を・に・で・と・も・の・から・まで)。ほかの助詞 (か・ね・よ など) は少し高くする。</summary>
+    private static readonly HashSet<string> CommonParticles = new(StringComparer.Ordinal) { "ha", "ga", "wo", "ni", "de", "to", "mo", "no", "kara", "made" };
+
+    /// <summary>
+    /// ローマ字を辞書の語と助詞に区切る、いちばん安い区切り方の点 (区切れなければ +∞)。
+    /// 語 1 つで 1、よく使う助詞は .5 (ほかの助詞は 1)、2 文字以下の助詞でない語 (あ・め など、何にでも当てはまる) は 3。
+    /// </summary>
+    public double SegmentCost(string normalized)
+    {
+        if (normalized.Length > PhraseMaxLength) return double.PositiveInfinity;
+        // best[i, k]: i 文字目までの区切りの点。k = 1 なら最後が語 (助詞でない)。語のすぐ後の語 (kyou|hame) は +1 (助詞を挟む文を選ぶ)
+        var best = new double[normalized.Length + 1, 2];
+        for (var i = 0; i <= normalized.Length; i++) best[i, 0] = best[i, 1] = double.PositiveInfinity;
+        best[0, 0] = 0;
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            for (var k = 0; k < 2; k++)
+            {
+                if (double.IsPositiveInfinity(best[i, k])) continue;
+                for (var j = i + 1; j <= Math.Min(normalized.Length, i + 24); j++)
+                {
+                    var w = normalized[i..j];
+                    if (Particles.Contains(w)) best[j, 0] = Math.Min(best[j, 0], best[i, k] + (CommonParticles.Contains(w) ? 0.5 : 1.0));
+                    else if (_japanese.Contains(w)) best[j, 1] = Math.Min(best[j, 1], best[i, k] + (w.Length <= 2 ? 3 : 1) + k * AdjacentWordCost);
+                }
+            }
+        }
+        return Math.Min(best[normalized.Length, 0], best[normalized.Length, 1]);
+    }
+
+    public double AdjacentWordCost { get; set; } = 1.0;
+
+    /// <summary>区切れたとみなす点の上限 (だいたい 3 文字に 1 区切りまで)。</summary>
+    private static double PhraseMaxCost(string normalized) => Math.Max(2, normalized.Length / 3.0);
+
+    /// <summary>文単位の直しで、区切りの点の重み (距離の重み α と比べる)。</summary>
+    public double PhraseSegmentWeight { get; set; } = 2.0;
+
+    /// <summary>文単位の直しの距離の重み。</summary>
+    public double PhraseAlpha { get; set; } = 6.0;
+
+    /// <summary>文単位の直しに要る、1 位と 2 位の点数の差。</summary>
+    public double PhraseTheta { get; set; } = 1.0;
+
+    /// <summary>
+    /// 日本語の文の打ち間違いを、1 か所の編集 (入れ替え・隣のキー・余分な文字) で直す。
+    /// 直した結果が語と助詞に区切れて、2 番目によい直しより θ 以上よいときだけ直す。
+    /// </summary>
+    public Result CorrectPhrase(string input)
+    {
+        var n = Normalize(input);
+        if (n.Length < PhraseMinLength || n.Length > PhraseMaxLength || !double.IsPositiveInfinity(SegmentCost(n)) && SegmentCost(n) <= PhraseMaxCost(n))
+            return Keep(input, Language.Japanese);
+        var scored = new List<Candidate>();
+        foreach (var v in SingleEdits(n).Distinct())
+        {
+            var seg = SegmentCost(v);
+            // 1 語に収まる直し (odakyu → odaku) は語の直しに任せる。ここは 2 語以上に区切れる文だけ
+            if (seg > PhraseMaxCost(v) || _japanese.Contains(v)) continue;
+            var dist = Distance(n, v);
+            scored.Add(new Candidate(v, Language.Japanese, dist, -PhraseAlpha * dist - PhraseSegmentWeight * seg));
+        }
+        if (scored.Count == 0) return Keep(input, Language.Japanese);
+        scored.Sort((a, b) => b.Score.CompareTo(a.Score));
+        var margin = scored.Count > 1 ? scored[0].Score - scored[1].Score : double.PositiveInfinity;
+        if (margin < PhraseTheta) return new Result(input, input, Language.Japanese, false, margin, scored);
+        // 抜けた文字を足す直しは、候補として比べるが選ばない。足す文字の候補が多く、どこにでも語が作れてしまい、直し間違いが一番多かった (抜け: 直し間違い 13%)
+        // 余分な文字を消す直し (重複を除く) も、同じ距離の「抜けた文字を足す」直しと見分けられないので選ばない。
+        // 選ぶのは、隣のキー (.4)・入れ替え (.5)・重複 (.3) で説明できるものだけ。
+        if (scored[0].Word.Length > n.Length || scored[0].Distance >= InsertCost) return new Result(input, input, Language.Japanese, false, margin, scored);
+        var output = scored[0].Word.Replace("N", "nn");
+        return new Result(input, output, Language.Japanese, true, margin, scored);
+    }
+
+    private static IEnumerable<string> SingleEdits(string s)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            yield return s.Remove(i, 1);
+            if (i + 1 < s.Length) yield return s[..i] + s[i + 1] + s[i] + s[(i + 2)..];
+            foreach (var k in Qwerty.Neighbors(s[i])) yield return s[..i] + k + s[(i + 1)..];
+        }
+        for (var i = 0; i <= s.Length; i++)
+            foreach (var k in "aiueokstnhmyrwgzdbpjfcN")
+                yield return s[..i] + k + s[i..];
     }
 
     public double ShortWordExtra { get; set; } = 1.5;
