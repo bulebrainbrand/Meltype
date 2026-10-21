@@ -36,8 +36,12 @@ public sealed class TypoCorrector
     private readonly NGramModel _englishModel;
     private readonly Dictionary<(char Typed, char Intended), double> _learned = [];
 
-    public TypoCorrector(IEnumerable<string> japaneseRomaji, IEnumerable<string> englishWords)
+    private readonly HashSet<string> _protected = new(StringComparer.Ordinal);
+
+    /// <param name="protectedWords">辞書に無くても直さない語 (固有名詞・製品名など)。</param>
+    public TypoCorrector(IEnumerable<string> japaneseRomaji, IEnumerable<string> englishWords, IEnumerable<string>? protectedWords = null)
     {
+        foreach (var w in protectedWords ?? []) _protected.Add(w.ToLowerInvariant());
         foreach (var w in japaneseRomaji) AddTo(_japanese, Normalize(w));
         foreach (var w in englishWords) AddTo(_english, w.ToLowerInvariant());
         _japaneseModel = new NGramModel(_japanese);
@@ -45,9 +49,69 @@ public sealed class TypoCorrector
     }
 
     /// <summary>同梱の辞書 (japanese.txt のローマ字、english-words.txt) で作る。</summary>
-    public static TypoCorrector FromBuiltIn() => new(
-        DictionarySource.Load("japanese.txt", null),
-        WordList.ParseWords(DictionarySource.ReadEmbedded("english-words.txt")));
+    /// 日本語は japanese.txt のローマ字に、readings.txt (JMdict のよく使う語の読み、約 2 万語) をローマ字にしたものを足す。
+    /// 固有名詞 (propernouns.txt)・製品名 (brands.txt)・カタカナ語の英語の綴り (loanwords.txt) は直さない語にする。
+    public static TypoCorrector FromBuiltIn()
+    {
+        var readings = DictionarySource.LinesWithoutComments(DictionarySource.ReadEmbedded("readings.txt"))
+            .Select(l => l.Split('\t')[0].Trim()).Where(l => l.Length > 0).Select(KanaToRomaji).OfType<string>();
+        var protectedWords = DictionarySource.Load("propernouns.txt", null)
+            .Concat(KanaLineSpellings("brands.txt")).Concat(KanaLineSpellings("loanwords.txt"));
+        return new(DictionarySource.Load("japanese.txt", null).Concat(readings),
+            WordList.ParseWords(DictionarySource.ReadEmbedded("english-words.txt")), protectedWords);
+    }
+
+    /// <summary>「かな 綴り 綴り …」の行の、かな以外の綴り。</summary>
+    private static IEnumerable<string> KanaLineSpellings(string name) =>
+        DictionarySource.LinesWithoutComments(DictionarySource.ReadEmbedded(name))
+            .SelectMany(l => l.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Skip(1));
+
+    private static readonly Dictionary<char, string> KanaTable = BuildKanaTable();
+
+    private static Dictionary<char, string> BuildKanaTable()
+    {
+        const string kana = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをがぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽ";
+        string[] romaji = ["a","i","u","e","o","ka","ki","ku","ke","ko","sa","shi","su","se","so","ta","chi","tsu","te","to","na","ni","nu","ne","no",
+            "ha","hi","fu","he","ho","ma","mi","mu","me","mo","ya","yu","yo","ra","ri","ru","re","ro","wa","wo",
+            "ga","gi","gu","ge","go","za","ji","zu","ze","zo","da","ji","zu","de","do","ba","bi","bu","be","bo","pa","pi","pu","pe","po"];
+        var table = new Dictionary<char, string>();
+        for (var i = 0; i < kana.Length; i++)
+        {
+            table[kana[i]] = romaji[i];
+            table[(char)(kana[i] + 0x60)] = romaji[i]; // カタカナ
+        }
+        return table;
+    }
+
+    /// <summary>かなをヘボン式のローマ字にする (きゃ → kya、しゃ → sha、っ → 子音を重ねる、ん → n / 母音・y の前は nn)。長音 (ー) など、打ち方が決まらないものを含む語は null。</summary>
+    public static string? KanaToRomaji(string kana)
+    {
+        var sb = new System.Text.StringBuilder();
+        var doubleNext = false;
+        for (var i = 0; i < kana.Length; i++)
+        {
+            var c = kana[i] is >= 'ァ' and <= 'ヶ' ? (char)(kana[i] - 0x60) : kana[i];
+            if (c == 'っ') { doubleNext = true; continue; }
+            if (c == 'ん')
+            {
+                var next = i + 1 < kana.Length && KanaTable.TryGetValue(kana[i + 1] is >= 'ァ' and <= 'ヶ' ? (char)(kana[i + 1] - 0x60) : kana[i + 1], out var n) ? n : "";
+                sb.Append(next.Length == 0 || "aiueoy".Contains(next[0]) ? "nn" : "n");
+                continue;
+            }
+            if (!KanaTable.TryGetValue(c, out var r)) return null;
+            var small = i + 1 < kana.Length ? kana[i + 1] : '\0';
+            if (small is >= 'ァ' and <= 'ヶ') small = (char)(small - 0x60);
+            if (small is 'ゃ' or 'ゅ' or 'ょ' && r.EndsWith('i'))
+            {
+                var y = small == 'ゃ' ? "a" : small == 'ゅ' ? "u" : "o";
+                r = r is "shi" or "chi" or "ji" ? r[..^1] + y : r[..^1] + "y" + y;
+                i++;
+            }
+            if (doubleNext) { sb.Append(r.StartsWith("ch") ? 't' : r[0]); doubleNext = false; }
+            sb.Append(r);
+        }
+        return doubleNext || sb.Length == 0 ? null : sb.ToString();
+    }
 
     private void AddTo(HashSet<string> set, string word)
     {
@@ -70,6 +134,8 @@ public sealed class TypoCorrector
             var next = i + 1 < s.Length ? s[i + 1] : '\0';
             var prev = i > 0 ? s[i - 1] : '\0';
             if (s[i] == 'n' && (next == '\'' || next == 'n')) { sb.Append('N'); i++; continue; }
+            // 子音の前と語の終わりの n も ん (shinkansen = shinkansenn)
+            if (s[i] == 'n' && !"aiueoy".Contains(next) && next != 'N') { sb.Append('N'); continue; }
             if (next == 'i' && s[i] == 's' && prev != 's' || next == 'i' && s[i] == 't' && prev != 't' && prev != 'c')
             {
                 sb.Append(s[i] == 's' ? "sh" : "ch");
@@ -86,7 +152,7 @@ public sealed class TypoCorrector
     {
         var lower = input.ToLowerInvariant();
         var romaji = Normalize(input);
-        if (_english.Contains(lower)) return Keep(input, Language.English);
+        if (_english.Contains(lower) || _protected.Contains(lower)) return Keep(input, Language.English);
         if (_japanese.Contains(romaji)) return Keep(input, Language.Japanese);
         if (lower.Length < MinLength || !lower.All(char.IsAsciiLetterLower)) return Keep(input, previous ?? Language.English);
 
@@ -116,9 +182,46 @@ public sealed class TypoCorrector
         var keepScore = Math.Max(Score(0, lower, Language.English, previous), Score(0, romaji, Language.Japanese, previous)) - Alpha * 0.9;
         var second = candidates.Count > 1 ? Math.Max(candidates[1].Score, keepScore) : keepScore;
         var margin = top.Score - second;
-        return margin >= Theta
+        // 辞書に無い語と打ち間違いは見分けにくい。短い語と、ローマ字としてそのまま読める語 (genshin・odakyu) は、
+        // 知らない正しい語のことが多いので、直すのに大きな差を求める (日本語の打ち間違いは、たいていローマ字として読めなくなる)。
+        var theta = Theta + (lower.Length <= 4 ? ShortWordExtra : 0) + (top.Language == Language.Japanese && IsRomaji(romaji) ? ValidRomajiExtra : 0)
+            + (top.Distance >= 0.7 ? CostlyEditExtra : 0);
+        return margin >= theta
             ? new Result(input, top.Word, top.Language, true, margin, candidates)
             : new Result(input, input, top.Language, false, margin, candidates);
+    }
+
+    public double ShortWordExtra { get; set; } = 1.5;
+    public double ValidRomajiExtra { get; set; } = 1.5;
+    /// <summary>隣のキー・入れ替え・重複のどれでもない直し (距離 .7 以上) に足す差。辞書に無い語 (mlops → mops) を守る。</summary>
+    public double CostlyEditExtra { get; set; } = 0.5;
+
+    private static readonly HashSet<string> Syllables = BuildSyllables();
+
+    private static HashSet<string> BuildSyllables()
+    {
+        var set = new HashSet<string>(KanaTable.Values, StringComparer.Ordinal) { "N" };
+        foreach (var r in KanaTable.Values.Where(r => r.EndsWith('i') && r.Length >= 2).ToList())
+            foreach (var v in "auo")
+                set.Add(r is "shi" or "chi" or "ji" ? r[..^1] + v : r[..^1] + "y" + v);
+        return set;
+    }
+
+    /// <summary>正規化したローマ字が、残らずかなに読めるか (促音の重ねた子音を含む)。</summary>
+    public static bool IsRomaji(string normalized)
+    {
+        var i = 0;
+        while (i < normalized.Length)
+        {
+            if (i + 1 < normalized.Length && normalized[i] == normalized[i + 1] && !"aiueoN".Contains(normalized[i])) { i++; continue; }
+            if (i + 2 < normalized.Length && normalized[i] == 't' && normalized[i + 1] == 'c' && normalized[i + 2] == 'h') { i++; continue; }
+            var matched = 0;
+            for (var len = 3; len >= 1 && matched == 0; len--)
+                if (i + len <= normalized.Length && Syllables.Contains(normalized.Substring(i, len))) matched = len;
+            if (matched == 0) return false;
+            i += matched;
+        }
+        return true;
     }
 
     private bool Has(string w) => _japanese.Contains(w) || _english.Contains(w);
@@ -135,8 +238,12 @@ public sealed class TypoCorrector
     /// <summary>確定した直し (入力 → 確定) を覚え、その置換を安くする。</summary>
     public void Learn(string typed, string confirmed) => AdjustPairs(typed, confirmed, 0.8);
 
-    /// <summary>直した直後に BackSpace で戻された直し (入力 → 直した語) は、その置換を高くする。</summary>
-    public void Reject(string typed, string proposed) => AdjustPairs(typed, proposed, 1.5);
+    /// <summary>直した直後に BackSpace で戻された直し (入力 → 直した語) は、その置換を高くし、入力をそれからは直さない語にする。</summary>
+    public void Reject(string typed, string proposed)
+    {
+        AdjustPairs(typed, proposed, 1.5);
+        _protected.Add(typed.ToLowerInvariant());
+    }
 
     private void AdjustPairs(string typed, string target, double factor)
     {
@@ -156,16 +263,18 @@ public sealed class TypoCorrector
     public double Distance(string a, string b)
     {
         var d = new double[a.Length + 1, b.Length + 1];
-        for (var i = 0; i <= a.Length; i++) d[i, 0] = i * DeleteCost;
-        for (var j = 0; j <= b.Length; j++) d[0, j] = j * InsertCost;
+        for (var i = 0; i <= a.Length; i++) d[i, 0] = i == 0 ? 0 : (i - 1 + FirstCharFactor) * InsertCost;
+        for (var j = 0; j <= b.Length; j++) d[0, j] = j * DeleteCost * FirstCharFactor;
         for (var i = 1; i <= a.Length; i++)
         {
             for (var j = 1; j <= b.Length; j++)
             {
                 // 入力 a に余分な文字がある (挿入の打ち間違い)。直前と同じ文字の重複は安い。
-                var extra = a[i - 1] == (i >= 2 ? a[i - 2] : '\0') ? DuplicateCost : InsertCost;
+                // 先頭の文字の打ち間違いはまれなので、先頭を変える直しは高くする (iphone → phone、emoji → moji を防ぐ)。
+                var first = i == 1 ? FirstCharFactor : 1;
+                var extra = a[i - 1] == (i >= 2 ? a[i - 2] : '\0') ? DuplicateCost : InsertCost * first;
                 var v = Math.Min(d[i - 1, j] + extra, d[i, j - 1] + DeleteCost);
-                v = Math.Min(v, d[i - 1, j - 1] + SubstituteCost(a[i - 1], b[j - 1]));
+                v = Math.Min(v, d[i - 1, j - 1] + SubstituteCost(a[i - 1], b[j - 1]) * first);
                 if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
                     v = Math.Min(v, d[i - 2, j - 2] + TransposeCost);
                 d[i, j] = v;
@@ -178,6 +287,7 @@ public sealed class TypoCorrector
     public const double DuplicateCost = 0.3;
     public const double InsertCost = 0.7;
     public const double DeleteCost = 0.7;
+    public const double FirstCharFactor = 2.0;
 
     public double SubstituteCost(char typed, char intended)
     {
