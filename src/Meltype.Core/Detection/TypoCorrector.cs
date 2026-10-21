@@ -128,6 +128,11 @@ public sealed class TypoCorrector
     public static string Normalize(string input)
     {
         var s = input.ToLowerInvariant();
+        // 拗音の訓令式 (tya → cha、sya → sha、zya・jya → ja) と、っち の綴り (cchi・ttyo → tchi・tcho) を揃える
+        s = System.Text.RegularExpressions.Regex.Replace(s, "ty([auo])", "ch$1");
+        s = System.Text.RegularExpressions.Regex.Replace(s, "sy([auo])", "sh$1");
+        s = System.Text.RegularExpressions.Regex.Replace(s, "(?:zy|jy)([auo])", "j$1");
+        s = s.Replace("cch", "tch");
         var sb = new System.Text.StringBuilder(s.Length + 4);
         for (var i = 0; i < s.Length; i++)
         {
@@ -160,10 +165,22 @@ public sealed class TypoCorrector
         var phraseAllowed = previous != Language.English && lower.Length >= PhraseMinLength;
         if (phraseAllowed && SegmentCost(romaji) <= PhraseMaxCost(romaji)) return Keep(input, Language.Japanese);
         var word = CorrectWord(input, lower, romaji, previous);
-        // 語の直しに候補があって (差が足りずに) そのままにしたものは、文として区切り直さない (1 語の打ち間違いを 2 語に割ってしまう)
-        if (word.Corrected || !phraseAllowed || word.Candidates.Count > 0) return word;
-        return CorrectPhrase(input) is { Corrected: true } phrase ? phrase : word;
+        // 語の直しに近い候補 (距離 1 未満) があって (差が足りずに) そのままにしたものは、文として区切り直さない (1 語の打ち間違いを 2 語に割ってしまう)
+        if (word.Corrected || !phraseAllowed || word.Candidates.Any(c => c.Distance < 1.0)) return OnlyLongVowelsUnlessJapanese(word, previous);
+        return CorrectPhrase(input) is { Corrected: true } phrase ? OnlyLongVowelsUnlessJapanese(phrase, previous) : word;
     }
+
+    /// <summary>
+    /// 長音の u を足すだけの直し (hokkaido → hokkaidou) は、日本語を打っている途中だけにする。
+    /// 英語やローマ字の名前 (Hokkaido・wagyu) として打ったのかもしれないので、言語が分からなければそのまま。
+    /// </summary>
+    private static Result OnlyLongVowelsUnlessJapanese(Result r, Language? previous)
+    {
+        if (!r.Corrected || previous == Language.Japanese) return r;
+        return StripLongVowels(Normalize(r.Output)) == StripLongVowels(Normalize(r.Input)) ? r with { Output = r.Input, Corrected = false } : r;
+    }
+
+    private static string StripLongVowels(string s) => System.Text.RegularExpressions.Regex.Replace(s, "(?<=[ou])u", "");
 
     private Result CorrectWord(string input, string lower, string romaji, Language? previous)
     {
@@ -181,7 +198,7 @@ public sealed class TypoCorrector
                     var inJa = _japanese.Contains(w);
                     var inEn = _english.Contains(w);
                     if (lang == Language.Japanese ? !inJa : !inEn) continue;
-                    var dist = Distance(key, w);
+                    var dist = Distance(key, w, lang == Language.Japanese);
                     if (dist > MaxDeletes) continue;
                     candidates.Add(new Candidate(w, lang, dist, Score(dist, w, lang, previous)));
                 }
@@ -196,10 +213,12 @@ public sealed class TypoCorrector
         var margin = top.Score - second;
         // 辞書に無い語と打ち間違いは見分けにくい。短い語と、ローマ字としてそのまま読める語 (genshin・odakyu) は、
         // 知らない正しい語のことが多いので、直すのに大きな差を求める (日本語の打ち間違いは、たいていローマ字として読めなくなる)。
-        var theta = Theta + (lower.Length <= 4 ? ShortWordExtra : 0) + (top.Language == Language.Japanese && IsRomaji(romaji) ? ValidRomajiExtra : 0)
+        // 日本語を打っている途中で、ローマ字として読めない入力 (kuas の s) は打ち間違いがはっきりしているので、短くても直してよい
+        var brokenJapanese = previous == Language.Japanese && top.Language == Language.Japanese && !IsRomaji(romaji);
+        var theta = Theta + (lower.Length <= 4 && !brokenJapanese ? ShortWordExtra : 0) + (top.Language == Language.Japanese && IsRomaji(romaji) ? ValidRomajiExtra : 0)
             + (top.Distance >= 0.7 ? CostlyEditExtra : 0);
         return margin >= theta
-            ? new Result(input, top.Word, top.Language, true, margin, candidates)
+            ? new Result(input, top.Word.Replace("N", "nn"), top.Language, true, margin, candidates)
             : new Result(input, input, top.Language, false, margin, candidates);
     }
 
@@ -208,7 +227,9 @@ public sealed class TypoCorrector
 
     /// <summary>助詞 (語の間に来る 1〜2 音の語。区切るときに安くする)。</summary>
     private static readonly HashSet<string> Particles = new(StringComparer.Ordinal)
-        { "ha", "ga", "wo", "ni", "de", "to", "mo", "no", "he", "ya", "ka", "ne", "yo", "kara", "made", "yori", "dake", "desu", "da", "masu", "ta", "te" };
+        { "ha", "ga", "wo", "ni", "de", "to", "mo", "no", "he", "ya", "ka", "ne", "yo", "kara", "made", "yori", "dake", "desu", "da", "masu", "ta", "te",
+          // 語の後に付く語 (出張中・田中さん・私たち)
+          "chuu", "san", "sama", "kun", "chan", "tachi" };
 
     /// <summary>文の途中によく来る助詞 (は・が・を・に・で・と・も・の・から・まで)。ほかの助詞 (か・ね・よ など) は少し高くする。</summary>
     private static readonly HashSet<string> CommonParticles = new(StringComparer.Ordinal) { "ha", "ga", "wo", "ni", "de", "to", "mo", "no", "kara", "made" };
@@ -264,12 +285,13 @@ public sealed class TypoCorrector
         if (n.Length < PhraseMinLength || n.Length > PhraseMaxLength || !double.IsPositiveInfinity(SegmentCost(n)) && SegmentCost(n) <= PhraseMaxCost(n))
             return Keep(input, Language.Japanese);
         var scored = new List<Candidate>();
-        foreach (var v in SingleEdits(n).Distinct())
+        var longVowels = LongVowelInsertions(n).ToHashSet();
+        foreach (var v in SingleEdits(n).Concat(longVowels).Distinct())
         {
             var seg = SegmentCost(v);
             // 1 語に収まる直し (odakyu → odaku) は語の直しに任せる。ここは 2 語以上に区切れる文だけ
             if (seg > PhraseMaxCost(v) || _japanese.Contains(v)) continue;
-            var dist = Distance(n, v);
+            var dist = Distance(n, v, japanese: true);
             scored.Add(new Candidate(v, Language.Japanese, dist, -PhraseAlpha * dist - PhraseSegmentWeight * seg));
         }
         if (scored.Count == 0) return Keep(input, Language.Japanese);
@@ -279,9 +301,23 @@ public sealed class TypoCorrector
         // 抜けた文字を足す直しは、候補として比べるが選ばない。足す文字の候補が多く、どこにでも語が作れてしまい、直し間違いが一番多かった (抜け: 直し間違い 13%)
         // 余分な文字を消す直し (重複を除く) も、同じ距離の「抜けた文字を足す」直しと見分けられないので選ばない。
         // 選ぶのは、隣のキー (.4)・入れ替え (.5)・重複 (.3) で説明できるものだけ。
-        if (scored[0].Word.Length > n.Length || scored[0].Distance >= InsertCost) return new Result(input, input, Language.Japanese, false, margin, scored);
+        // 長音の u を足す直し (2 か所まで) は選んでよい。打ち間違いでなく、打ち方の癖なので見分けやすい
+        var chosen = scored[0].Word;
+        var isLongVowel = longVowels.Contains(chosen) || longVowels.Any(l => l.Length == chosen.Length && Distance(l, chosen, true) < InsertCost);
+        if (!isLongVowel && (chosen.Length > n.Length || scored[0].Distance >= InsertCost)) return new Result(input, input, Language.Japanese, false, margin, scored);
         var output = scored[0].Word.Replace("N", "nn");
         return new Result(input, output, Language.Japanese, true, margin, scored);
+    }
+
+    /// <summary>o・u の後に長音の u を 1〜2 か所足したもの (shutchochu → shutchouchuu)。</summary>
+    private static IEnumerable<string> LongVowelInsertions(string s)
+    {
+        var spots = Enumerable.Range(1, s.Length).Where(i => s[i - 1] is 'o' or 'u' && (i == s.Length || s[i] != 'u')).ToList();
+        foreach (var a in spots)
+        {
+            yield return s.Insert(a, "u");
+            foreach (var b in spots.Where(b => b > a)) yield return s.Insert(b, "u").Insert(a, "u");
+        }
     }
 
     private static IEnumerable<string> SingleEdits(string s)
@@ -366,7 +402,7 @@ public sealed class TypoCorrector
     }
 
     /// <summary>重み付きの Damerau-Levenshtein (隣り合う入れ替えだけを許す、制限付きの版)。</summary>
-    public double Distance(string a, string b)
+    public double Distance(string a, string b, bool japanese = false)
     {
         var d = new double[a.Length + 1, b.Length + 1];
         for (var i = 0; i <= a.Length; i++) d[i, 0] = i == 0 ? 0 : (i - 1 + FirstCharFactor) * InsertCost;
@@ -379,7 +415,9 @@ public sealed class TypoCorrector
                 // 先頭の文字の打ち間違いはまれなので、先頭を変える直しは高くする (iphone → phone、emoji → moji を防ぐ)。
                 var first = i == 1 ? FirstCharFactor : 1;
                 var extra = a[i - 1] == (i >= 2 ? a[i - 2] : '\0') ? DuplicateCost : InsertCost * first;
-                var v = Math.Min(d[i - 1, j] + extra, d[i, j - 1] + DeleteCost);
+                // 日本語の長音の u の抜け (shucchou を shuccho、chuu を chu と打つ) は安い
+                var missing = japanese && b[j - 1] == 'u' && j >= 2 && b[j - 2] is 'o' or 'u' ? LongVowelCost : DeleteCost;
+                var v = Math.Min(d[i - 1, j] + extra, d[i, j - 1] + missing);
                 v = Math.Min(v, d[i - 1, j - 1] + SubstituteCost(a[i - 1], b[j - 1]) * first);
                 if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
                     v = Math.Min(v, d[i - 2, j - 2] + TransposeCost);
@@ -394,6 +432,7 @@ public sealed class TypoCorrector
     public const double InsertCost = 0.7;
     public const double DeleteCost = 0.7;
     public const double FirstCharFactor = 2.0;
+    public const double LongVowelCost = 0.2;
 
     public double SubstituteCost(char typed, char intended)
     {

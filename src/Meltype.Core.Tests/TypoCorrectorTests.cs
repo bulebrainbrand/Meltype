@@ -167,6 +167,35 @@ internal static class TypoCorrectorTests
     }
 
     [Test]
+    public static void ShortJapaneseTypo_IsCorrected()
+    {
+        // 草 (kusa) の s と a が入れ替わった。ローマ字として読めない (s で終わる) ので、4 文字でも直す
+        Assert.Equal("kusa", Shared.Value.Correct("kuas", Language.Japanese).Output);
+        Assert.Equal("kuas", Shared.Value.Correct("kuas", Language.English).Output, "英語を打っているときは直さない");
+    }
+
+    [Test]
+    public static void KunreiYouonAndLongVowelOmission_AreCorrected()
+    {
+        // 出張中: tyo/tyu (訓令式の拗音) と、長音の u の抜け
+        Assert.Equal("shutchouchuu", Shared.Value.Correct("shuttyotyu", Language.Japanese).Output);
+        Assert.Equal("shutchouchuu", Shared.Value.Correct("Shuttyotyu", Language.Japanese).Output);
+        // 正しい綴りは、cch でも tch でも書き換えない
+        Assert.Equal(false, Shared.Value.Correct("shucchouchuu", Language.Japanese).Corrected, "shucchouchuu");
+        Assert.Equal(false, Shared.Value.Correct("shucchou", Language.Japanese).Corrected, "shucchou");
+        Assert.Equal(false, Shared.Value.Correct("shuttyou", Language.Japanese).Corrected, "shuttyou (訓令式)");
+        Assert.Equal(TypoCorrector.Normalize("shutchou"), TypoCorrector.Normalize("shucchou"));
+        Assert.Equal(TypoCorrector.Normalize("shutchou"), TypoCorrector.Normalize("syuttyou"));
+    }
+
+    [Test]
+    public static void LongVowelOnly_NeedsJapaneseContext()
+    {
+        Assert.Equal("hokkaido", Shared.Value.Correct("hokkaido").Output, "言語が分からなければ Hokkaido のまま");
+        Assert.Equal("hokkaidou", Shared.Value.Correct("hokkaido", Language.Japanese).Output, "日本語を打っている途中なら ほっかいどう");
+    }
+
+    [Test]
     public static void JapanesePhrases_AreNotChanged()
     {
         // 語 + 助詞 + 語 は辞書に無いが、正しい日本語。直したら直し間違い。
@@ -277,12 +306,16 @@ internal static class TypoCorrectorTests
                 return neighbors.Length == 0 ? w : w[..i] + neighbors[random.Next(neighbors.Length)] + w[(i + 1)..];
             case 1: return w[..i] + w[i + 1] + w[i] + w[(i + 2)..];
             case 2: return w[..(i + 1)] + w[i] + w[(i + 1)..];
+            case 4:
+                // 長音の u を抜く (shutchou → shutcho)。無ければそのまま (呼ぶ側で除く)
+                var spots = Enumerable.Range(1, w.Length - 1).Where(k => w[k] == 'u' && w[k - 1] is 'o' or 'u').ToArray();
+                return spots.Length == 0 ? w : w.Remove(spots[random.Next(spots.Length)], 1);
             default: return w.Remove(i, 1);
         }
     }
 
     /// <summary>雑音の種類。</summary>
-    public enum Noise { AdjacentKey, Transpose, Duplicate, Delete }
+    public enum Noise { AdjacentKey, Transpose, Duplicate, Delete, LongVowel }
 
     public sealed record Sample(string Original, string Typed, Language Language, Noise? Noise);
 
@@ -377,7 +410,7 @@ internal static class TypoCorrectorTests
         Console.WriteLine($"  平均 直った {rates.Average(r => r.Fix):P1} ± {StdDev(rates.Select(r => r.Fix)):P1} / 別の語 {rates.Average(r => r.Wrong):P2} ± {StdDev(rates.Select(r => r.Wrong)):P2}");
 
         Console.WriteLine("\n[雑音の種類ごと (英語、2000 語)]");
-        foreach (var kind in Enum.GetValues<Noise>())
+        foreach (var kind in Enum.GetValues<Noise>().Where(k => k != Noise.LongVowel))
             Console.WriteLine($"  {kind,-12} {Run(c, MakeSamples(c, 2000, 201, Language.English, kind))}");
 
         Console.WriteLine("\n[言語ごと]");
@@ -391,7 +424,10 @@ internal static class TypoCorrectorTests
         Console.WriteLine("\n[日本語の文の打ち間違い (語 + 助詞 + 語 に雑音 1 つ。2000 文ずつ)]");
         foreach (var kind in Enum.GetValues<Noise>())
             Console.WriteLine($"  {kind,-12} {Run(c, MakePhraseSamples(2000, 911, kind))}");
-        foreach (var t in new[] { "kyouahame", "kyouhaaem", "watashihagakusei", "watshihagakusei", "ashitahaharedesu", "ashitahaharedsu" })
+        Console.WriteLine("\n[長音の u の抜け (日本語の語 / 文、2000 ずつ)]");
+        Console.WriteLine($"  語           {Run(c, MakeSamples(c, 2000, 221, Language.Japanese, Noise.LongVowel).Where(x => x.Typed != x.Original))}");
+        Console.WriteLine($"  文           {Run(c, MakePhraseSamples(2000, 921, Noise.LongVowel).Where(x => x.Typed != x.Original))}");
+        foreach (var t in new[] { "kuas", "shuttyotyu", "benkyotyu", "kaigityu", "kyouahame", "kyouhaaem", "watashihagakusei", "watshihagakusei", "ashitahaharedesu", "ashitahaharedsu" })
             Console.WriteLine($"  例 {t} → {c.Correct(t, Language.Japanese).Output}");
 
         Console.WriteLine("\n[日本語の文 (語 + 助詞 + 語。直してはいけない)]");
