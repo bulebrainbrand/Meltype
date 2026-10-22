@@ -7,6 +7,16 @@ export function icon(name, extra = "") {
   return `<svg class="ic${extra ? " " + extra : ""}" aria-hidden="true"><use href="${ICONS}#i-${name}"/></svg>`;
 }
 
+export function safeIcon(name,extra=""){
+  const svg = document.createElement("svg");
+  svg.className = `ic${extra ? " " + extra : ""}`;
+  svg.ariaHidden = "true";
+  const use = document.createElement("use");
+  use.href = `${ICONS}#i-${name}`;
+  svg.appendChild(use);
+  return svg;
+}
+
 export function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }

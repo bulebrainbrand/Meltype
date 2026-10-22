@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 Konayukiw */
 
-import { escapeHtml, getJson, icon, initHeader } from "./common.js";
+import { escapeHtml, getJson, icon, initHeader, safeIcon } from "./common.js";
 import { FILE_ACCEPT, FORMS, LIMITS, fileTypeOf, formById, formByTemplate, formatBytes, maxLength, validateFields } from "./report-schema.js";
 
 const DRAFT_KEY = "meltype-report-draft";
@@ -95,33 +95,162 @@ function renderPicker() {
   });
 }
 
-function fieldHtml(field, required) {
-  const id = `f-${field.id}`;
-  const wide = field.type === "textarea" || field.type === "code" || field.type === "checks";
-  const hint = field.hint ? `<span class="hint" id="${id}-hint">${escapeHtml(field.hint)}</span>` : "";
-  const describedBy = [field.hint ? `${id}-hint` : "", `${id}-error`].filter(Boolean).join(" ");
-  const common = `id="${id}" name="${field.id}" aria-describedby="${describedBy}"${required ? ' aria-required="true"' : ""}`;
-  const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
-  let control = "";
-  let counter = "";
-  if (field.type === "select") {
-    control = `<select class="select" ${common}><option value="">選んでください</option>${field.options.map((o) => `<option>${escapeHtml(o)}</option>`).join("")}</select>`;
-  } else if (field.type === "checks") {
-    control = `<div class="checks">${field.options
-      .map((o, i) => `<label class="check"><input type="checkbox" name="${field.id}" value="${escapeHtml(o)}" id="${id}-${i}">${escapeHtml(o)}</label>`)
-      .join("")}</div>`;
-    return `<div class="field is-wide" data-field="${field.id}"><fieldset aria-describedby="${describedBy}"><legend>${escapeHtml(field.label)}</legend>${hint}${control}</fieldset><span class="field-error" id="${id}-error"></span></div>`;
-  } else if (field.type === "text") {
-    control = `<input class="input" type="text" autocomplete="off" ${common}${placeholder}>`;
-  } else {
-    control = `<textarea class="textarea${field.type === "code" ? " is-code" : ""}" ${common}${placeholder}${field.type === "code" ? ' spellcheck="false" wrap="off"' : ""} rows="${field.type === "code" ? 6 : 4}"></textarea>`;
-    counter = `<span class="counter" data-counter="${field.id}"></span>`;
+function toFieldId(id){
+  return `f-${id}`;
+}
+
+function getAriaDescribedByLabel(field){
+  const id = toFieldId(field.id);
+  if(field.hint){
+    return `${id}-hint ${id}-error`
   }
-  return `<div class="field${wide ? " is-wide" : ""}" data-field="${field.id}">
-    <label for="${id}">${escapeHtml(field.label)}${required ? '<span class="req">必須</span>' : ""}</label>
-    ${wide ? hint + control : control + hint}${counter}
-    <span class="field-error" id="${id}-error"></span>
-  </div>`;
+  return `${id}-error`
+}
+
+function createFieldHint(id,hintText){
+  const hint = document.createElement("span");
+  hint.className = "hint";
+  hint.id = `${id}-hint` 
+  hint.textContent = hintText;
+  return hint;
+}
+
+function createChecksField(field){
+  const id = toFieldId(field.id);
+  const container = document.createElement("div");
+  container.classList.add("field","is-wide")
+  container.setAttribute("data-field",field.id);
+  const fieldset = document.createElement("fieldset");
+  fieldset.setAttribute("aria-describedby",getAriaDescribedByLabel(field));
+  const legend = document.createElement("legend");
+  legend.textContent = field.label
+  fieldset.append(legend);
+  if(field.hint){
+    fieldset.append(createFieldHint(field.id,field.hint))
+  }
+  const checks = document.createElement("div");
+  checks.className = "checks";
+  for(const [i,text] of field.options.entries()){
+    const label = document.createElement("label");
+    label.className = "check"
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox"
+    checkbox.name = field.id
+    checkbox.value = text;
+    checkbox.id = `${id}-${i}`;
+    label.append(checkbox,text);
+    checks.append(label);
+  }
+  fieldset.append(checks)
+  const fieldError = document.createElement("span");
+  fieldError.className = "field-error"
+  fieldError.setAttribute("id",`${id}-error`)
+  container.append(fieldset,fieldError);
+}
+
+function createSelectField(field,required){
+  const select = document.createElement("select");
+  select.className = "select";
+  applyInputLabels(select,field,required);
+  const message = document.createElement("option");
+  message.textContent = "選んでください";
+  message.value = ""; 
+  select.append(message)
+  select.append(...field.options.map(text => {
+    const option = document.createElement("option");
+    option.textContent = text;
+  }))
+  return select;
+}
+
+function createTextField(field,required){
+  const input = document.createElement("input");
+  input.className = "input";
+  input.type = "text";
+  input.autocomplete = "off";
+  input.placeholder = field.placeholder ?? "";
+  applyInputLabels(input,field,required);
+  return input;
+}
+
+function createTextAreaField(field,required){
+  const textArea = document.createElement("textarea");
+  textArea.classList.add("textarea");
+  applyInputLabels(textArea,field,required);
+  textArea.placeholder = field.placeholder ?? "";
+  if(field.type === "code"){
+    textArea.classList.add("is-code");
+    textArea.spellcheck = false;
+    textArea.wrap = "off";
+    textArea.rows = 6;
+  }
+  else {
+    textArea.rows = 4;
+  }
+  const counter = document.createElement("span");
+  counter.className = "counter";
+  counter.setAttribute("data-counter",field.id)
+  return [textArea,counter]
+}
+
+function createFieldContainer(field,required,...control){
+  const id = toFieldId(field.id); 
+  const isWide = field.type === "textarea" || field.type === "code" || field.type === "checks";
+  const div = document.createElement("div")
+  div.classList.append("field")
+  if(isWide){div.classList.add("is-wide")}
+  div.setAttribute("data-field",field.id);
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.append(field.label);
+  if(required){
+    const span = document.createElement("span");
+    span.className = "req";
+    span.textContent = "必須"
+    label.append(span);
+  }
+  div.append(label)
+  
+  if(isWide){
+    if(field.hint){
+      div.append(createFieldHint(field.id,field.hint))
+    }
+    div.append(...control);
+  }
+  else {
+    div.append(...control);
+    if(field.hint){
+      div.append(createFieldHint(field.id,field.hint))
+    }
+  }
+
+  const fieldError = document.createElement("span");
+  fieldError.className = "field-error"
+  fieldError.setAttribute("id",`${id}-error`)
+  div.append(fieldError);
+  return div;
+}
+
+function applyInputLabels(element,field,required){
+  element.id = toFieldId(field.id);
+  element.name = field.id;
+  element.setAttribute("aria-describedby",getAriaDescribedByLabel(field));
+  if(required){
+    element.setAttribute("aria-required",true)
+  }
+}
+
+function createFieldElement(field,required){
+  if(field.type === "checks"){
+    return createChecksField(field);
+  }
+  if(field.type === "select"){
+    return createFieldContainer(field,required,createSelectField(field,required))
+  }
+  if(field.type === "text"){
+    return createFieldContainer(field,required,createTextField(field,required))
+  }
+  return createFieldContainer(field,required,...createTextAreaField(field,required))
 }
 
 function fillValues(form) {
@@ -146,9 +275,12 @@ function selectForm(id, focus) {
   state.form = form;
   const radio = picker.querySelector(`input[value="${id}"]`);
   if (radio) radio.checked = true;
-  note.innerHTML = `${icon("info")}<span>${escapeHtml(form.note)}</span>`;
-  requiredBox.innerHTML = form.required.map((field) => fieldHtml(field, true)).join("");
-  optionalBox.innerHTML = form.optional.map((field) => fieldHtml(field, false)).join("");
+  const icon = safeIcon("info")
+  const span = document.createElement("span");
+  span.textContent = form.note
+  note.append(icon,span)
+  requiredBox.append(...form.required.map((field) => createFieldElement(field, true)));
+  optionalBox.append(...form.optional.map((field) => createFieldElement(field, false)));
   body.hidden = false;
   fillValues(form);
   saveDraft();
@@ -215,7 +347,18 @@ function onInput(event) {
 }
 
 function setStatus(kind, message) {
-  status.innerHTML = message ? `<p class="callout is-${kind}">${icon(kind === "danger" ? "alert" : "info")}<span>${escapeHtml(message)}</span></p>` : "";
+  if(message){
+    const p = document.createElement("p")
+    p.className = `callout is-${kind}`
+    const icon = safeIcon(kind === "danger" ? "alert" : "info")
+    const span = document.createElement("span")
+    span.textContent = message;
+    p.append(icon,span);
+    status.replaceChildren(p);
+  }
+  else {
+    status.replaceChildren();
+  }
 }
 
 function fileRules() {
@@ -227,8 +370,35 @@ function totalSize() {
   return state.files.reduce((sum, entry) => sum + entry.file.size, 0);
 }
 
+function createFileMetaElement(name,size) {
+  const meta = document.createElement("span");
+  meta.className = "file-meta";
+  const b = document.createElement("b");
+  b.textContent = name;
+  const small = document.createElement("small");
+  small.textContent = formatBytes(size);
+  const progress = document.createElement("span");
+  progress.hidden = true;
+  progress.className = "file-progress";
+  progress.append(document.createElement("span"));
+  meta.append(b,small,progress);
+  return meta;
+}
+
+function createFileRemoveButtonElement(name){
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-btn";
+  const icon = safeIcon("trash");
+  const span = document.createElement("span");
+  span.className = "sr-only";
+  span.textContent = `${name} を外す`;
+  remove.append(icon,span);
+  return remove
+}
+
 function renderFiles() {
-  fileList.innerHTML = "";
+  fileList.replaceChildren();
   for (const entry of state.files) {
     const item = document.createElement("li");
     item.className = "file-item";
@@ -243,15 +413,10 @@ function renderFiles() {
       media.alt = "";
       thumb.append(media);
     } else {
-      thumb.innerHTML = icon(GROUP_ICONS[entry.type.group]);
+      thumb.appendChild(safeIcon(GROUP_ICONS[entry.type.group]));
     }
-    const meta = document.createElement("span");
-    meta.className = "file-meta";
-    meta.innerHTML = `<b>${escapeHtml(entry.file.name)}</b><small>${formatBytes(entry.file.size)}</small><span class="file-progress" hidden><span></span></span>`;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "icon-btn";
-    remove.innerHTML = `${icon("trash")}<span class="sr-only">${escapeHtml(entry.file.name)} を外す</span>`;
+    const meta = createFileMetaElement(entry.file.name,entry.file.size);
+    const remove = createFileRemoveButtonElement(entry.file.name);
     remove.addEventListener("click", () => {
       if (state.sending) return;
       if (entry.url) URL.revokeObjectURL(entry.url);
