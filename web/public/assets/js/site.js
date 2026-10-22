@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 Konayukiw */
 
-import { detectOs, escapeHtml, formatDate, formatNumber, getJson, icon, initCopyButtons, initHeader, prefersReducedMotion } from "./common.js";
+import { detectOs, escapeHtml, formatDate, formatNumber, getJson, icon, initCopyButtons, initHeader, prefersReducedMotion, safeIcon } from "./common.js";
 import { formatBytes } from "./report-schema.js";
 
 const KANA = {
@@ -131,7 +131,12 @@ function initDemo() {
 
   function render(example, typed, stage) {
     const parts = [];
-    if (example.ctx) parts.push(`<span class="ctx">${escapeHtml(example.ctx)}</span>`);
+    if (example.ctx) {
+      const span = document.createElement("span")
+      span.className = "ctx";
+      span.textContent = example.ctx
+      parts.push(span)
+    };
     let remaining = typed;
     for (const seg of example.segs) {
       if (!remaining && stage === "typing") break;
@@ -142,14 +147,28 @@ function initDemo() {
       const classes = ["seg", seg.lang === "en" ? "is-en" : "is-ja"];
       if (stage === "converted") classes.push("is-conv");
       if (stage === "done") classes.push("is-done");
-      parts.push(`<span class="${classes.join(" ")}">${escapeHtml(text)}</span>`);
+      const span = document.createElement("span");
+      span.classList.add(...classes);
+      span.textContent = text
+      parts.push(span);
     }
-    if (stage !== "done") parts.push('<span class="caret"></span>');
-    line.innerHTML = parts.join("");
+    if (stage !== "done") {
+      const span = document.createElement("span");
+      span.className = "caret";
+      parts.push(span)
+    };
+    line.replaceChildren(...parts);
   }
 
   function showKey(name) {
-    press.innerHTML = name ? `<kbd>${escapeHtml(name)}</kbd>` : "";
+    if(name){
+      const kbd =document.createElement("kbd")
+      kbd.textContent = name
+      press.replaceChildren(kbd)
+    }
+    else {
+      press.replaceChildren()
+    }
   }
 
   function showStatic(example) {
@@ -519,26 +538,64 @@ function renderReleases(data) {
   const preview = data.releases.find((r) => r.prerelease && (!latest || new Date(r.publishedAt) > new Date(latest.publishedAt)));
   // 更新情報は 3 件まで (最新の版・新しいプレビュー版・その前の版)
   const shown = [latest, preview, ...stable.slice(1)].filter(Boolean).slice(0, 3);
-  box.innerHTML = shown
+  box.replaceChildren(...shown
     .map((release) => {
+      const article = document.createElement("article");
+      article.classList.add("release")
+      if(release === latest){
+        article.classList.add("is-latest");
+      }
+      const releaseHead = document.createElement("div");
+      releaseHead.className = "release-head";
+      const releaseHeadTitle = document.createElement("h3");
+      const titleLink = document.createElement("a");
+      titleLink.href = release.url;
+      titleLink.textContent = release.name;
+      releaseHeadTitle.append(titleLink);
       const badges = [];
-      if (release === latest) badges.push('<span class="badge is-sky">最新の版</span>');
-      if (release.prerelease) badges.push('<span class="badge is-pink">プレビュー版</span>');
-      const assets = release.assets
-        .map((asset) => `<li><a href="${escapeHtml(asset.url)}">${icon("download")}${escapeHtml(asset.name)} <small>${formatBytes(asset.size)}・${formatNumber(asset.downloads)} 回</small></a></li>`)
-        .join("");
-      return `<article class="release${release === latest ? " is-latest" : ""}">
-        <div class="release-head">
-          <h3><a href="${escapeHtml(release.url)}">${escapeHtml(release.name)}</a></h3>
-          ${badges.join("")}
-          <span class="release-date">${formatDate(release.publishedAt)}</span>
-        </div>
-        <div class="release-notes">${markdown(release.notes || "")}</div>
-        <button class="release-more" type="button" aria-expanded="false">続きを読む</button>
-        <ul class="assets">${assets}</ul>
-      </article>`;
-    })
-    .join("");
+      if(release === latest){
+        const badge = document.createElement("span");
+        badge.classList.add("badge","is-sky");
+        badge.textContent = "最新の版";
+        badges.push(badge);
+      }
+      if(release.prerelease){
+        const badge = document.createElement("span");
+        badge.classList.add("badge","is-pink");
+        badge.textContent = "プレビュー版";
+        badges.push(badge);
+      }
+      const relreaseDate = document.createElement("span");
+      relreaseDate.className = "release-date";
+      relreaseDate.textContent = formatDate(release,publishedAt)
+      releaseHead.append(releaseHeadTitle,...badges,relreaseDate)
+
+      const releaseNotes = document.createElement("div");
+      releaseNotes.className = "release-notes";
+      releaseNotes.innerHTML = markdown(release.notes || "");
+
+      const releaseMore = document.createElement("button");
+      releaseMore.className = "release-more"
+      releaseMore.type = "button"
+      releaseMore.ariaExpanded = "false"
+      releaseMore.textContent = "続きを読む"
+      
+      const assets = document.createElement("ul");
+      for(const asset of assets){
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = asset.url;
+        const icon = safeIcon("download");
+        const small = document.createElement("small");
+        small.textContent = `${formatBytes(asset.size)}・${formatNumber(asset.downloads)} 回`
+        a.append(icon,asset.name,small);
+        li.append(a);
+        assets.append(li);
+      }
+
+      article.append(releaseHead,releaseNotes,releaseMore,assets)
+      return article;
+    }));
   box.querySelectorAll(".release").forEach((article) => {
     const notes = article.querySelector(".release-notes");
     const more = article.querySelector(".release-more");
@@ -558,18 +615,47 @@ function renderReleases(data) {
 function renderPeople(data) {
   const sponsors = document.querySelector("[data-sponsors]");
   if (sponsors && data.sponsors.length) {
-    sponsors.innerHTML = data.sponsors
-      .map((login) => `<li><a href="https://github.com/${escapeHtml(login)}" title="@${escapeHtml(login)}"><img src="https://github.com/${escapeHtml(login)}.png?size=120" alt="@${escapeHtml(login)}" width="60" height="60" loading="lazy"></a></li>`)
-      .join("");
+    sponsors.replaceChildren(...data.sponsors
+      .map((login) => {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = `https://github.com/${login}`
+        a.title = `@${login}`
+        const image = document.createElement("img");
+        image.src = `https://github.com/${login}.png?size=120`
+        image.alt = `@${login}`
+        image.width = 60;
+        image.height = 60;
+        image.loading = "lazy"
+        a.append(image)
+        li.append(a)
+        return li
+      }))
   }
   const contributors = document.querySelector("[data-contributors]");
   if (contributors && data.contributors.length) {
-    contributors.innerHTML = data.contributors
+    contributors.replaceChildren(...data.contributors
       .map((person) => {
         const avatar = `${person.avatar}${person.avatar.includes("?") ? "&" : "?"}s=120`;
-        return `<li><a href="${escapeHtml(person.url)}" title="@${escapeHtml(person.login)}・${formatNumber(person.contributions)} コミット"><img src="${escapeHtml(avatar)}" alt="" width="60" height="60" loading="lazy"><span class="name">${escapeHtml(person.login)}</span><span class="commits">${formatNumber(person.contributions)} commits</span></a></li>`;
-      })
-      .join("");
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = person.url;
+        a.title = `@${person.login}・${formatNumber(person.contributions)} コミット`;
+        const image = document.createElement("img");
+        image.src = avatar;
+        image.alt = "";
+        image.width = 60;
+        image.height = 60;
+        image.loading = "lazy"
+        const name = document.createElement("span")
+        name.className = "name";
+        name.textContent = person.login
+        const commits = document.createElement("span");
+        commits.className = "commits";
+        a.append(image,name,commits);
+        li.append(a);
+        return li
+      }));
     const count = document.querySelector("[data-contributor-count]");
     if (count) count.textContent = `${data.contributors.length} 人`;
   }
@@ -612,7 +698,19 @@ function applyDownloads(data, os) {
   const hashes = document.querySelector("[data-hashes]");
   const digests = latest.assets.filter((a) => a.digest);
   if (hashes && digests.length) {
-    hashes.innerHTML = `<p>${escapeHtml(latest.tag)} の SHA-256:</p>` + digests.map((a) => `<div><b>${escapeHtml(a.name)}</b><br><code>${escapeHtml(a.digest.replace(/^sha256:/, ""))}</code></div>`).join("");
+    const tag = document.createElement("p");
+    tag.textContent = latest.tag + " の SHA-256:"; 
+    const hashElements = digests.map((a) => {
+      const div = document.createElement("div");
+      const b = document.createElement("b");
+      b.textContent = escapeHtml(a.name)
+      const br = document.createElement("br") 
+      const code = document.createElement("code");
+      code.textContent = a.digest.replace(/^sha256:/, "")
+      div.append(b,br,code)
+      return div
+    })
+    hashes.replaceChildren(tag,...hashElements)
     hashes.hidden = false;
   }
 }
