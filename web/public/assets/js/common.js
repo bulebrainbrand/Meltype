@@ -202,3 +202,36 @@ export async function getJson(url, options) {
   }
   return body;
 }
+
+/**
+ * 
+ * @param {string} tag 
+ * @returns {(arg:string,...children:(HTMLElement | string)[]) => HTMLElement}
+ */
+export function createElementFactory(tag){
+  return function(className,...children){
+    const element = document.createElement(tag);
+    element.className = className;
+    element.append(children);
+    return element
+  }
+}
+
+export const div = createElementFactory("div");
+export const b = createElementFactory("b")
+export const span = createElementFactory("span")
+export const h2 = createElementFactory("h2")
+export const h3 = createElementFactory("h3")
+export const button = createElementFactory("button")
+export const a = createElementFactory("a")
+export const option = (className,value,...children) => {
+  const element = createElementFactory("option")(className,...children)
+  element.value = value
+  return element
+}
+export const pre = createElementFactory("pre")
+export const dt = createElementFactory("dt")
+export const dd = createElementFactory("dd")
+export const dl = createElementFactory("dl")
+export const p = createElementFactory("p")
+export const small = createElementFactory("small")

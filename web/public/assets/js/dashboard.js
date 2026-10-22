@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 Konayukiw */
 
-import { copyText, escapeHtml, formatDate, formatNumber, getJson, icon, initHeader, relativeTime, toast } from "./common.js";
+import { copyText, escapeHtml, formatDate, formatNumber, getJson, icon, initHeader, relativeTime, safeIcon, toast,a,div,h2,h3,b,button,span,option,pre,dt,dd,dl,p } from "./common.js";
 import { FORMS, formById, formatBytes, privateLabels, toMarkdown } from "./report-schema.js";
 
 const REPO = "https://github.com/yksr-melt/Meltype";
@@ -23,7 +23,7 @@ const filters = {
 };
 const state = { items: [], next: null, selected: null, topId: 0, loading: false, current: null, days: null };
 
-filters.form.innerHTML = `<option value="">すべての種類</option>${FORMS.map((form) => `<option value="${form.id}">${escapeHtml(form.label)}</option>`).join("")}`;
+filters.form.replaceChildren(option("","","すべての種類"),FORMS.map(form => option("",form.id,form.label)));
 
 function query(extra = {}) {
   const params = new URLSearchParams();
@@ -61,11 +61,19 @@ function drawChart(days) {
 }
 
 function renderKinds(byForm, total) {
-  document.querySelector("[data-kinds]").innerHTML = FORMS.map((form) => {
+  document.querySelector("[data-kinds]").replaceChildren(...FORMS.map((form) => {
     const count = byForm[form.id] || 0;
     const ratio = total ? Math.round((count / total) * 100) : 0;
-    return `<div class="kind-bar ${COLORS[form.id]}"><div><span>${escapeHtml(form.label)}</span><b>${formatNumber(count)}</b></div><span class="meter"><span data-ratio="${ratio}"></span></span></div>`;
-  }).join("");
+    const spanEle = document.createElement("span");
+    spanEle.setAttribute("data-ratio",String(ratio))
+    return div("kind-bar",
+      div(
+        span("",form.label),
+        b("",formatNumber(count))
+      ),
+      span("meter",spanEle)
+    )
+  }));
   document.querySelectorAll("[data-ratio]").forEach((bar) => (bar.style.width = `${bar.dataset.ratio}%`));
 }
 
@@ -112,23 +120,29 @@ async function loadList(reset) {
     if (reset && !filters.q.value && !filters.form.value && !filters.status.value && result.reports[0]) state.topId = Math.max(state.topId, result.reports[0].id);
     renderList();
   } catch (e) {
-    list.innerHTML = `<li class="empty">${escapeHtml(e.message)}</li>`;
+    const li =document.createElement("li");
+    li.className = "empty";
+    li.textContent = e.message
+    list.replaceChildren(li)
   } finally {
     state.loading = false;
   }
 }
 
 function valueHtml(field, value) {
-  if (Array.isArray(value)) return escapeHtml(value.join("、"));
-  if (field && field.type === "code") return `<pre>${escapeHtml(value)}</pre>`;
-  return escapeHtml(value);
+  if (Array.isArray(value)) return value.join("、");
+  if (field && field.type === "code") return pre("",value);
+  return value;
 }
 
 function fieldsHtml(fields, values) {
   const rows = fields
     .filter((field) => values[field.id] != null && values[field.id] !== "" && !(Array.isArray(values[field.id]) && !values[field.id].length))
-    .map((field) => `<div><dt>${escapeHtml(field.label)}</dt><dd>${valueHtml(field, values[field.id])}</dd></div>`);
-  return rows.length ? `<dl class="kv">${rows.join("")}</dl>` : '<p class="small">書かれていません</p>';
+    .map((field) => div(
+      dt("",field.label),
+      dd("",valueHtml(field, values[field.id]))
+    ));
+  return rows.length ? dl("kv",...rows) : p("small","書かれていません");
 }
 
 function fileUrl(report, attachment, download) {
@@ -136,12 +150,41 @@ function fileUrl(report, attachment, download) {
 }
 
 function attachmentHtml(report, attachment) {
-  const head = `<div class="attach-head">${icon(GROUP_ICONS[attachment.grp] || "clip")}<b title="${escapeHtml(attachment.name)}">${escapeHtml(attachment.name)}</b><small>${formatBytes(attachment.size)}</small>`;
-  if (!attachment.uploaded_at) return `<div class="attach">${head}<span class="badge is-pink">届いていません</span></div></div>`;
-  const links = `<a href="${fileUrl(report, attachment, false)}" target="_blank" rel="noopener">開く</a><a href="${fileUrl(report, attachment, true)}">保存</a></div>`;
-  if (attachment.grp === "image") return `<div class="attach">${head}${links}<a href="${fileUrl(report, attachment, false)}" target="_blank" rel="noopener"><img src="${fileUrl(report, attachment, false)}" alt="${escapeHtml(attachment.name)}" loading="lazy"></a></div>`;
-  if (attachment.grp === "video") return `<div class="attach">${head}${links}<video src="${fileUrl(report, attachment, false)}" controls preload="metadata"></video></div>`;
-  return `<div class="attach">${head}${links}<pre data-preview="${attachment.idx}">読み込んでいます…</pre></div>`;
+  const head = (...elements) => div("attach-head",
+    safeIcon(GROUP_ICONS[attachment.grp] || "clip"),
+    b("", attachment.name),
+    span("", formatBytes(attachment.size)),
+    ...elements
+  );
+  if (!attachment.uploaded_at) return div("attach",head(span("badge is-pink","届いていません")))
+  const openLink = a("","開く");
+  openLink.href = fileUrl(report, attachment, false)
+  openLink.target = "_blank"
+  openLink.rel = "noopener"
+  const saveLink = a("","保存")
+  saveLink.href = fileUrl(report, attachment, true)
+  if (attachment.grp === "image") {
+    const image = document.createElement("img")
+    image.src = fileUrl(report, attachment, false)
+    image.alt = attachment.name
+    image.loading = "lazy"
+    const link = openLink.cloneNode().append();
+    link.append(image)
+    return div("attach",
+      head(openLink,saveLink),
+      link
+      );
+    }
+  if (attachment.grp === "video") {
+    const video = document.createElement("video");
+    video.src = fileUrl(report, attachment, false)
+    video.controls = true
+    video.preload = "metadata"
+    return div("attach",head(openLink,saveLink),video)
+  }
+  const loadingMessage = p("","読み込んでいます…");
+  loadingMessage.setAttribute("data-preview",attachment.idx)
+  return div(head(openLink,saveLink),loadingMessage)
 }
 
 async function loadPreviews(report) {
@@ -180,21 +223,52 @@ function issueUrl(report) {
 function renderDetail(report) {
   state.current = report;
   const form = formById(report.form);
-  const status = report.status === "uploading" ? `<span class="badge is-pink">${STATUS.uploading}</span>` : `<span class="badge is-sky">${STATUS.new}</span>`;
-  detail.innerHTML = `<div class="detail-head">
-      <div class="report-sub"><b>#${report.id}</b><span class="badge ${COLORS[report.form]}">${escapeHtml(form ? form.label : report.form)}</span>${status}<span>${escapeHtml(formatDate(report.created_at * 1000, true))}</span></div>
-      <h2>${escapeHtml(report.title)}</h2>
-      <div class="detail-actions">
-        <button class="btn btn-small" type="button" data-copy-md>${icon("copy")}Issue の形でコピー</button>
-        <a class="btn btn-ghost btn-small" href="${escapeHtml(issueUrl(report))}" target="_blank" rel="noopener">${icon("external")}GitHub で Issue を作る</a>
-        <button class="btn btn-ghost btn-small" type="button" data-copy-link>${icon("link")}この報告へのリンク</button>
-      </div>
-    </div>
-    <div class="detail-section"><h3><span class="pane-tag is-req">必須</span>かならず書く所</h3>${fieldsHtml(form ? form.required : [], report.fields)}</div>
-    <div class="detail-section"><h3><span class="pane-tag is-opt">任意</span>あれば書く所</h3>${fieldsHtml(form ? form.optional : [], report.fields)}</div>
-    <div class="detail-section"><h3>${icon("clip")}添付 (${report.attachments.length})</h3>${
-      report.attachments.length ? `<div class="attach-grid">${report.attachments.map((a) => attachmentHtml(report, a)).join("")}</div>` : '<p class="small">添付はありません</p>'
-    }</div>`;
+  const reportSub = div("report-sub",
+    b("",report.id),
+    span(`badge ${COLORS[report.form]}`,form ? form.label : report.form),
+    report.status === "uploading" ? span("badge is-pink",STATUS.uploading) : span("badge is-sky",STATUS.new),
+    span("",formatDate(report.created_at * 1000, true))
+  )
+
+  const title = h2("",report.title);
+
+  const copyAsIssueButton = button("btn btn-small",safeIcon("copy"),"Issue の形でコピー")
+  copyAsIssueButton.type = "button";
+  copyAsIssueButton.setAttribute("data-copy-md",true)
+  const issueLink = a("btn btn-ghost btn-small",safeIcon("external"),"GitHub で Issue を作る")
+  issueLink.href = issueUrl(report);
+  issueLink.target = "_blank"
+  issueLink.rel = "noopener"
+  const copyLink = button("btn btn-ghost btn-small",safeIcon("link"),"この報告へのリンク");
+  copyLink.type = "button"
+  copyLink.setAttribute("data-copy-link",true);
+  const detailActions = div("detail-actions",copyAsIssueButton,issueLink,copyLink)
+
+  const detailHead = div("detail-head",reportSub,title,detailActions);
+  detail.replaceChildren(
+    detailHead,
+    div("detail-section",
+      h3("",
+        span("pane-tag is-req","必須"),
+        "かならず書く所"),
+      fieldsHtml(form ? form.required : [], report.fields)
+    ),
+    div("detail-section",
+      h3("",
+        span("pane-tag is-opt","任意"),
+        "あれば書く所"),
+      fieldsHtml(form ? form.optional : [], report.fields)
+    ),
+    div("detail-section",
+      h3("",
+        safeIcon("clip"),
+        `添付 (${report.attachments.length})`
+      ),
+      report.attachments.length ? 
+        div("attach-grid", ...report.attachments.map((a) => attachmentHtml(report, a)))
+      : p("small","添付はありません")
+    )
+  );
   detail.querySelector("[data-copy-md]").addEventListener("click", async () => toast((await copyText(markdownFor(report))) ? "Issue の形でコピーしました" : "コピーできませんでした"));
   detail.querySelector("[data-copy-link]").addEventListener("click", async () => toast((await copyText(`${location.origin}/dashboard/?id=${report.id}`)) ? "リンクをコピーしました" : "コピーできませんでした"));
   loadPreviews(report);
@@ -209,12 +283,12 @@ async function select(id, scroll) {
   const url = new URL(location.href);
   url.searchParams.set("id", String(id));
   history.replaceState(null, "", url);
-  detail.innerHTML = '<p class="detail-empty">読み込んでいます…</p>';
+  detail.replaceChildren( p("detail-empty","読み込んでいます…"));
   try {
     renderDetail(await getJson(`/api/dashboard/reports/${id}`));
     if (scroll && window.matchMedia("(max-width: 1000px)").matches) detail.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) {
-    detail.innerHTML = `<p class="detail-empty">${escapeHtml(e.message)}</p>`;
+    detail.replaceChildren(p("detail-empty",e.message))
   }
 }
 
